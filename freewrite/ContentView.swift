@@ -87,15 +87,18 @@ struct ContentView: View {
     @State private var text: String = ""  // Remove initial welcome text since we'll handle it in createNewEntry
     
     @State private var isFullscreen = false
-    @State private var selectedFont: String = "Lato-Regular"
-    @State private var currentRandomFont: String = ""
+    @AppStorage("typeface") private var typefaceRaw: String = Typeface.mono.rawValue
+    @AppStorage("fontSize") private var fontSizeValue: Double = 18
+    @AppStorage("focusMode") private var focusMode = false
+    @AppStorage("typewriterMode") private var typewriterMode = false
+    @StateObject private var editorController = EditorController()
+    @State private var didInstallKeyMonitor = false
     @State private var timeRemaining: Int = 900  // Changed to 900 seconds (15 minutes)
     @State private var timerIsRunning = false
     @State private var isHoveringTimer = false
     @State private var isHoveringFullscreen = false
     @State private var hoveredFont: String? = nil
     @State private var isHoveringSize = false
-    @State private var fontSize: CGFloat = 18
     @State private var blinkCount = 0
     @State private var isBlinking = false
     @State private var opacity: Double = 1.0
@@ -140,9 +143,7 @@ struct ContentView: View {
     let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     let entryHeight: CGFloat = 40
     
-    let availableFonts = NSFontManager.shared.availableFontFamilies
-    let standardFonts = ["Lato-Regular", "Arial", ".AppleSystemUIFont", "Times New Roman"]
-    let fontSizes: [CGFloat] = [16, 18, 20, 22, 24, 26]
+    let fontSizes: [CGFloat] = [14, 16, 18, 20, 22, 24, 26]
     let placeholderOptions = [
         "Begin writing",
         "Pick a thought and go",
@@ -675,8 +676,27 @@ struct ContentView: View {
         }
     }
     
-    var randomButtonTitle: String {
-        return currentRandomFont.isEmpty ? "Random" : "Random [\(currentRandomFont)]"
+    private var typeface: Typeface {
+        Typeface(rawValue: typefaceRaw) ?? .mono
+    }
+
+    private var fontSize: CGFloat {
+        CGFloat(fontSizeValue)
+    }
+
+    private var palette: Palette {
+        Palette.forScheme(colorScheme)
+    }
+
+    private var editorStyle: EditorStyle {
+        EditorStyle(
+            typeface: typeface,
+            fontSize: fontSize,
+            colorScheme: colorScheme,
+            focusMode: focusMode,
+            typewriterMode: typewriterMode,
+            spellCheck: false
+        )
     }
 
     private func startVideoRecordingPreflight() {
@@ -836,14 +856,14 @@ struct ContentView: View {
     
     var timerColor: Color {
         if timerIsRunning {
-            return isHoveringTimer ? (colorScheme == .light ? .black : .white) : .gray.opacity(0.8)
+            return isHoveringTimer ? palette.inkColor : palette.accentColor
         } else {
-            return isHoveringTimer ? (colorScheme == .light ? .black : .white) : (colorScheme == .light ? .gray : .gray.opacity(0.8))
+            return isHoveringTimer ? palette.inkColor : palette.secondaryColor
         }
     }
     
     var lineHeight: CGFloat {
-        let font = NSFont(name: selectedFont, size: fontSize) ?? .systemFont(ofSize: fontSize)
+        let font = typeface.nsFont(size: fontSize)
         let defaultLineHeight = getLineHeight(font: font)
         return (fontSize * 1.5) - defaultLineHeight
     }
@@ -862,17 +882,43 @@ struct ContentView: View {
     }
 
     
+    private func navTextButton(_ title: String, key: String, isActive: Bool, action: @escaping () -> Void) -> some View {
+        Button(title, action: action)
+            .buttonStyle(.plain)
+            .foregroundColor(isActive || hoveredFont == key ? palette.inkColor : palette.secondaryColor)
+            .onHover { hovering in
+                hoveredFont = hovering ? key : nil
+                isHoveringBottomNav = hovering
+                if hovering {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+    }
+
+    /// Installed once: swallows delete keys while "Backspace is Off".
+    private func installKeyMonitorIfNeeded() {
+        guard !didInstallKeyMonitor else { return }
+        didInstallKeyMonitor = true
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if backspaceDisabled && (event.keyCode == 51 || event.keyCode == 117) {
+                return nil
+            }
+            return event
+        }
+    }
+
     var body: some View {
-        let buttonBackground = colorScheme == .light ? Color.white : Color.black
         let navHeight: CGFloat = 68
-        let textColor = colorScheme == .light ? Color.gray : Color.gray.opacity(0.8)
-        let textHoverColor = colorScheme == .light ? Color.black : Color.white
+        let textColor = palette.secondaryColor
+        let textHoverColor = palette.inkColor
         let isViewingVideoEntry = currentVideoURL != nil
         
         HStack(spacing: 0) {
             // Main content
             ZStack {
-                Color(colorScheme == .light ? .white : .black)
+                palette.paperColor
                     .ignoresSafeArea()
 
                 // Show video player if a video entry is selected
@@ -885,47 +931,22 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .ignoresSafeArea(edges: .top)
                 } else {
-                    // Show text editor for text entries
-                    TextEditor(text: $text)
-                    .background(Color(colorScheme == .light ? .white : .black))
-                    .font(.custom(selectedFont, size: fontSize))
-                    .foregroundColor(colorScheme == .light ? Color(red: 0.20, green: 0.20, blue: 0.20) : Color(red: 0.9, green: 0.9, blue: 0.9))
-                    .scrollContentBackground(.hidden)
-                    .scrollIndicators(.never)
-                    .lineSpacing(lineHeight)
-                    .frame(maxWidth: 650)
-                    .padding(.top, 40)
-                    .id("\(selectedFont)-\(fontSize)-\(colorScheme)")
+                    // Markdown editor for text entries
+                    MarkdownEditor(
+                        text: $text,
+                        style: editorStyle,
+                        placeholder: placeholderText,
+                        controller: editorController,
+                        onOpenPiece: { _ in }
+                    )
                     .padding(.bottom, bottomNavOpacity > 0 ? navHeight : 0)
-                    .colorScheme(colorScheme)
                     .onAppear {
-                        placeholderText = placeholderOptions.randomElement() ?? "Begin writing"
-                        // Removed findSubview code which was causing errors
-
-                        // Add keyboard monitor for backspace/delete keys
-                        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                            // Check if backspace is disabled and the key is delete/backspace
-                            if backspaceDisabled && (event.keyCode == 51 || event.keyCode == 117) {
-                                // Block the backspace/delete key
-                                return nil
-                            }
-                            return event
+                        if placeholderText.isEmpty {
+                            placeholderText = placeholderOptions.randomElement() ?? "Begin writing"
                         }
                     }
-                    .overlay(
-                        ZStack(alignment: .topLeading) {
-                            if text.isEmpty {
-                                Text(placeholderText)
-                                    .font(.custom(selectedFont, size: fontSize))
-                                    .foregroundColor(colorScheme == .light ? .gray.opacity(0.5) : .gray.opacity(0.6))
-                                    .allowsHitTesting(false)
-                                    .offset(x: 5, y: 40)
-                            }
-                        }, alignment: .topLeading
-                    )
                 }
-                    
-                
+
                 VStack {
                     Spacer()
                     HStack {
@@ -957,122 +978,37 @@ struct ContentView: View {
                                 isHoveringBottomNav = hovering
                             }
                         } else {
-                            // Font buttons (left)
+                            // Typography controls (left)
                             HStack(spacing: 8) {
-                                Button(fontSizeButtonTitle) {
-                                    if let currentIndex = fontSizes.firstIndex(of: fontSize) {
-                                        let nextIndex = (currentIndex + 1) % fontSizes.count
-                                        fontSize = fontSizes[nextIndex]
+                                navTextButton(fontSizeButtonTitle, key: "size", isActive: false) {
+                                    let currentIndex = fontSizes.firstIndex(of: fontSize) ?? 1
+                                    fontSizeValue = Double(fontSizes[(currentIndex + 1) % fontSizes.count])
+                                }
+
+                                ForEach(Typeface.allCases) { face in
+                                    Text("•")
+                                        .foregroundColor(palette.faintColor)
+
+                                    navTextButton(face.displayName, key: face.rawValue, isActive: typeface == face) {
+                                        typefaceRaw = face.rawValue
                                     }
                                 }
-                                .buttonStyle(.plain)
-                                .foregroundColor(isHoveringSize ? textHoverColor : textColor)
-                                .onHover { hovering in
-                                    isHoveringSize = hovering
-                                    isHoveringBottomNav = hovering
-                                    if hovering {
-                                        NSCursor.pointingHand.push()
-                                    } else {
-                                        NSCursor.pop()
-                                    }
-                                }
-                                
+
                                 Text("•")
-                                    .foregroundColor(.gray)
-                                
-                                Button("Lato") {
-                                    selectedFont = "Lato-Regular"
-                                    currentRandomFont = ""
+                                    .foregroundColor(palette.faintColor)
+
+                                navTextButton("Focus", key: "focus", isActive: focusMode) {
+                                    focusMode.toggle()
                                 }
-                                .buttonStyle(.plain)
-                                .foregroundColor(hoveredFont == "Lato" ? textHoverColor : textColor)
-                                .onHover { hovering in
-                                    hoveredFont = hovering ? "Lato" : nil
-                                    isHoveringBottomNav = hovering
-                                    if hovering {
-                                        NSCursor.pointingHand.push()
-                                    } else {
-                                        NSCursor.pop()
-                                    }
-                                }
-                                
+                                .help("Dim everything but the paragraph you're in")
+
                                 Text("•")
-                                    .foregroundColor(.gray)
-                                
-                                Button("Arial") {
-                                    selectedFont = "Arial"
-                                    currentRandomFont = ""
+                                    .foregroundColor(palette.faintColor)
+
+                                navTextButton("Typewriter", key: "typewriter", isActive: typewriterMode) {
+                                    typewriterMode.toggle()
                                 }
-                                .buttonStyle(.plain)
-                                .foregroundColor(hoveredFont == "Arial" ? textHoverColor : textColor)
-                                .onHover { hovering in
-                                    hoveredFont = hovering ? "Arial" : nil
-                                    isHoveringBottomNav = hovering
-                                    if hovering {
-                                        NSCursor.pointingHand.push()
-                                    } else {
-                                        NSCursor.pop()
-                                    }
-                                }
-                                
-                                Text("•")
-                                    .foregroundColor(.gray)
-                                
-                                Button("System") {
-                                    selectedFont = ".AppleSystemUIFont"
-                                    currentRandomFont = ""
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundColor(hoveredFont == "System" ? textHoverColor : textColor)
-                                .onHover { hovering in
-                                    hoveredFont = hovering ? "System" : nil
-                                    isHoveringBottomNav = hovering
-                                    if hovering {
-                                        NSCursor.pointingHand.push()
-                                    } else {
-                                        NSCursor.pop()
-                                    }
-                                }
-                                
-                                Text("•")
-                                    .foregroundColor(.gray)
-                                
-                                Button("Serif") {
-                                    selectedFont = "Times New Roman"
-                                    currentRandomFont = ""
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundColor(hoveredFont == "Serif" ? textHoverColor : textColor)
-                                .onHover { hovering in
-                                    hoveredFont = hovering ? "Serif" : nil
-                                    isHoveringBottomNav = hovering
-                                    if hovering {
-                                        NSCursor.pointingHand.push()
-                                    } else {
-                                        NSCursor.pop()
-                                    }
-                                }
-                                
-                                Text("•")
-                                    .foregroundColor(.gray)
-                                
-                                Button(randomButtonTitle) {
-                                    if let randomFont = availableFonts.randomElement() {
-                                        selectedFont = randomFont
-                                        currentRandomFont = randomFont
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundColor(hoveredFont == "Random" ? textHoverColor : textColor)
-                                .onHover { hovering in
-                                    hoveredFont = hovering ? "Random" : nil
-                                    isHoveringBottomNav = hovering
-                                    if hovering {
-                                        NSCursor.pointingHand.push()
-                                    } else {
-                                        NSCursor.pop()
-                                    }
-                                }
+                                .help("Keep the line you're writing at the centre of the window")
                             }
                             .padding(8)
                             .cornerRadius(6)
@@ -1128,7 +1064,7 @@ struct ContentView: View {
                             }
 
                             Text("•")
-                                .foregroundColor(.gray)
+                                .foregroundColor(palette.faintColor)
 
                             // Video camera button
                             Button(action: {
@@ -1210,11 +1146,11 @@ struct ContentView: View {
                                     }
                                 }
                                 .frame(minWidth: 300, idealWidth: 320, maxWidth: 360)
-                                .background(colorScheme == .light ? Color.white : Color.black)
+                                .background(palette.paperColor)
                             }
 
                             Text("•")
-                                .foregroundColor(.gray)
+                                .foregroundColor(palette.faintColor)
 
                             Button("Chat") {
                                 showingChatMenu = true
@@ -1371,7 +1307,7 @@ struct ContentView: View {
                             }
                             
                             Text("•")
-                                .foregroundColor(.gray)
+                                .foregroundColor(palette.faintColor)
 
                             if !isViewingVideoEntry {
                                 // Backspace toggle button
@@ -1393,7 +1329,7 @@ struct ContentView: View {
                                 }
 
                                 Text("•")
-                                    .foregroundColor(.gray)
+                                    .foregroundColor(palette.faintColor)
                             }
 
                             Button(isFullscreen ? "Minimize" : "Fullscreen") {
@@ -1414,7 +1350,7 @@ struct ContentView: View {
                             }
                             
                             Text("•")
-                                .foregroundColor(.gray)
+                                .foregroundColor(palette.faintColor)
                             
                             Button(action: {
                                 createNewEntry()
@@ -1435,7 +1371,7 @@ struct ContentView: View {
                             }
                             
                             Text("•")
-                                .foregroundColor(.gray)
+                                .foregroundColor(palette.faintColor)
                             
                             // Theme toggle button
                             Button(action: {
@@ -1458,7 +1394,7 @@ struct ContentView: View {
                             }
 
                             Text("•")
-                                .foregroundColor(.gray)
+                                .foregroundColor(palette.faintColor)
 
                             // Version history button
                             Button(action: {
@@ -1487,7 +1423,7 @@ struct ContentView: View {
                         }
                     }
                     .padding()
-                    .background(Color(colorScheme == .light ? .white : .black))
+                    .background(palette.paperColor)
                     .opacity(bottomNavOpacity)
                     .onHover { hovering in
                         isHoveringBottomNav = hovering
@@ -1684,7 +1620,7 @@ struct ContentView: View {
                     .scrollIndicators(.never)
                 }
                 .frame(width: 200)
-                .background(Color(colorScheme == .light ? .white : NSColor.black))
+                .background(palette.sidebarColor)
             }
         }
         .overlay {
@@ -1709,6 +1645,7 @@ struct ContentView: View {
         .preferredColorScheme(colorScheme)
         .onAppear {
             showingSidebar = false  // Hide sidebar by default
+            installKeyMonitorIfNeeded()
             loadExistingEntries()
         }
         .onChange(of: showingVideoRecording) { _, isShowing in
@@ -2142,7 +2079,7 @@ struct ContentView: View {
         let paragraphStyle = NSMutableParagraphStyle()
         paragraphStyle.lineSpacing = lineHeight
         
-        let font = NSFont(name: selectedFont, size: fontSize) ?? .systemFont(ofSize: fontSize)
+        let font = typeface.nsFont(size: fontSize)
         let textAttributes: [NSAttributedString.Key: Any] = [
             .font: font,
             .foregroundColor: NSColor(red: 0.20, green: 0.20, blue: 0.20, alpha: 1.0),

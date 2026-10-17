@@ -13,10 +13,8 @@ struct freewriteApp: App {
     @AppStorage("colorScheme") private var colorSchemeString: String = "light"
     
     init() {
-        // Register Lato font
-        if let fontURL = Bundle.main.url(forResource: "Lato-Regular", withExtension: "ttf") {
-            CTFontManagerRegisterFontsForURL(fontURL as CFURL, .process, nil)
-        }
+        // Register every bundled face (IBM Plex Mono/Serif, Lato) for the editor
+        FontRegistry.registerBundledFonts()
     }
      
     var body: some Scene {
